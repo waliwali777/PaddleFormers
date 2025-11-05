@@ -24,41 +24,32 @@ import numpy as np
 import paddle
 import paddle.distributed as dist
 
-from paddleformers.ops import Topology
-from paddleformers.trainer import PdArgumentParser, get_last_checkpoint
-from paddleformers.trainer.auto_trainer import AutoTrainer
-from paddleformers.trainer.auto_training_args import AutoTrainingArguments
-from paddleformers.trainer.trainer_utils import IntervalStrategy, _get_distributed_seeds
-from paddleformers.transformers import (
-    AutoTokenizer,
-    CosineAnnealingWithWarmupDecay,
-    LinearAnnealingWithWarmupDecay,
-    LlamaConfig,
-    LlamaForCausalLM3DAuto,
-    LlamaForCausalLMNet,
-    LlamaPretrainingCriterion3DAuto,
-    LlamaPretrainingCriterionNet,
-)
-from paddleformers.utils.log import logger
-
-MODEL_CLASSES = {
-    "llama": (LlamaConfig, LlamaForCausalLM3DAuto, LlamaPretrainingCriterion3DAuto),
-    "llama_network": (LlamaConfig, LlamaForCausalLMNet, LlamaPretrainingCriterionNet),
-}
-
-
 from paddleformers.data.causal_dataset import (
     build_train_valid_test_datasets,
     check_data_split,
     print_rank_0,
 )
+from paddleformers.ops import Topology
+from paddleformers.trainer import PdArgumentParser, get_last_checkpoint
+from paddleformers.trainer.trainer import Trainer
+from paddleformers.trainer.trainer_utils import IntervalStrategy, _get_distributed_seeds
+from paddleformers.trainer.training_args import TrainingArguments
 from paddleformers.trainer.utils.doc import add_start_docstrings
+from paddleformers.transformers import (
+    AutoTokenizer,
+    CosineAnnealingWithWarmupDecay,
+    LinearAnnealingWithWarmupDecay,
+    LlamaConfig,
+    LlamaForCausalLM,
+    LlamaPretrainingCriterion,
+)
+from paddleformers.utils.log import logger
 from paddleformers.utils.tools import get_env_device
 
 
 @dataclass
-@add_start_docstrings(AutoTrainingArguments.__doc__)
-class PreTrainingArguments(AutoTrainingArguments):
+@add_start_docstrings(TrainingArguments.__doc__)
+class PreTrainingArguments(TrainingArguments):
     min_learning_rate: float = field(
         default=1e-5,
         metadata={"help": "Minimum learning rate deacyed to."},
@@ -338,7 +329,7 @@ def get_train_data_file(args):
     return files
 
 
-class PretrainingTrainer(AutoTrainer):
+class PretrainingTrainer(Trainer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.is_pretraining = True
@@ -474,7 +465,9 @@ def main():
                 "the `--output_dir` or add `--overwrite_output_dir` to train from scratch."
             )
 
-    config_class, model_class, criterion_class = MODEL_CLASSES[model_args.model_type]
+    config_class = LlamaConfig
+    model_class = LlamaForCausalLM
+    criterion_class = LlamaPretrainingCriterion
 
     config = config_class.from_pretrained(model_args.model_name_or_path)
     tokenizer = AutoTokenizer.from_pretrained(model_args.tokenizer_name_or_path)
@@ -542,8 +535,6 @@ def main():
             # It's OK, not use accumulate_steps optimization
             pass
 
-    print("Final pre-training config:", config)
-
     if (
         "replace_with_parallel_cross_entropy" in training_args.tensor_parallel_config
         and config.tensor_parallel_degree > 1
@@ -552,6 +543,15 @@ def main():
         from llm.utils.replace_ops import replace_cross_entropy
 
         replace_cross_entropy()
+
+    if training_args.use_intermediate_api:
+        config.run_single_model = True
+        config.tensor_parallel_degree = 1
+        config.sharding_parallel_degree = 1
+        config.sep_parallel_degree = 1
+        config.context_parallel_degree = 1
+
+    print("Final pre-training config:", config)
 
     # # Set the dtype for loading model
     # dtype = "float32"
